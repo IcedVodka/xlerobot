@@ -49,7 +49,7 @@ class XLerobotHost:
 
 def main():
     logging.info("Configuring Xlerobot")
-    robot_config = XLerobotConfig(id="my_xlerobot_pc")
+    robot_config = XLerobotConfig(id="xl")
     robot = XLerobot(robot_config)
 
     logging.info("Connecting Xlerobot")

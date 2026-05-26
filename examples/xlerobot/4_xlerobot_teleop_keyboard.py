@@ -13,9 +13,8 @@ import numpy as np
 import math
 import argparse
 
-# Comment the following line when used locally
 from lerobot.robots.xlerobot import XLerobotConfig, XLerobot
-# from lerobot.robots.xlerobot.xlerobot_client import XLerobotClient, XLerobotClientConfig
+from lerobot.robots.xlerobot.xlerobot_client import XLerobotClient, XLerobotClientConfig
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 from lerobot.model.SO101Robot import SO101Kinematics
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
@@ -381,30 +380,33 @@ class SimpleTeleopArm:
         return action
     
 
-def main(robot_id=None):
+def main(robot_id=None, remote_ip=None):
     # Teleop parameters
     FPS = 20
-    # ip = "192.168.1.123"  # This is for zmq connection
-    ip = "localhost"  # This is for local/wired connection
-    robot_name = "my_xlerobot_pc"
+    robot_name = robot_id or "my_xlerobot_pc"
 
-    # For zmq connection
-    # robot_config = XLerobotClientConfig(remote_ip=ip, id=robot_name)
-    # robot = XLerobotClient(robot_config)    
+    if remote_ip:
+        # For zmq connection
+        print(f"[MAIN] Using ZMQ remote connection to {remote_ip}")
+        robot_config = XLerobotClientConfig(remote_ip=remote_ip, id=robot_name)
+        robot = XLerobotClient(robot_config)
+    else:
+        # For local/wired connection
+        print("[MAIN] Using local connection")
+        robot_config = XLerobotConfig(id=robot_id)
+        robot = XLerobot(robot_config)
 
-    # For local/wired connection
-    robot_config = XLerobotConfig(id=robot_id)
-    robot = XLerobot(robot_config)
-    
     try:
         robot.connect()
         print(f"[MAIN] Successfully connected to robot")
     except Exception as e:
         print(f"[MAIN] Failed to connect to robot: {e}")
+        if remote_ip:
+            print(f"[MAIN] Make sure xlerobot_host.py is running on {remote_ip}")
         print(robot_config)
         print(robot)
         return
-        
+
     init_rerun(session_name="xlerobot_teleop_v2")
 
     #Init the keyboard instance
@@ -482,9 +484,9 @@ def main(robot_id=None):
         print("Teleoperation ended.")
 
 if __name__ == "__main__":
-    # temporary arg parse: set robot id from the command arg like -robot_id=R12251899
     parser = argparse.ArgumentParser()
-    parser.add_argument("--robot_id", type=str)
+    parser.add_argument("--robot_id", type=str, help="Robot ID")
+    parser.add_argument("--remote_ip", type=str, help="Remote robot IP for ZMQ connection (e.g., 10.42.0.192)")
     args = parser.parse_args()
 
-    main(args.robot_id)
+    main(args.robot_id, args.remote_ip)
