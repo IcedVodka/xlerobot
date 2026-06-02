@@ -114,8 +114,9 @@ def check_python_env() -> tuple[bool, object]:
     if "x86_64" in file_path_lower and machine in ("aarch64", "arm64"):
         print(Colors.warn("⚠️ 警告: pyrealsense2 路径包含 x86_64 字样，但当前是 ARM 架构!"))
         print(Colors.info("  你可能安装的是 x86_64 版本的 pyrealsense2，需要重新编译/安装 ARM 版本。"))
-    elif machine in ("aarch64", "arm64") and "aarch64" not in file_path_lower and "arm" not in file_path_lower:
-        print(Colors.warn("⚠️ 警告: pyrealsense2 路径未包含 ARM/aarch64 标识，请确认是 ARM 编译版本。"))
+    elif "amd64" in file_path_lower and machine in ("aarch64", "arm64"):
+        print(Colors.warn("⚠️ 警告: pyrealsense2 路径包含 amd64 字样，但当前是 ARM 架构!"))
+        print(Colors.info("  你可能安装的是 x86_64 版本的 pyrealsense2，需要重新编译/安装 ARM 版本。"))
     else:
         print(Colors.ok("架构与库路径看起来匹配"))
 
@@ -163,7 +164,7 @@ def check_context_and_devices(rs_module) -> tuple[bool, list]:
     # 2.2 查询设备数量
     print("尝试 ctx.query_devices() ...")
     try:
-        devices = ctx.query_devices()
+        devices = list(ctx.query_devices())
         count = len(devices)
         print(f"  发现设备数量: {count}")
         if count == 0:
@@ -197,8 +198,8 @@ def check_device_details(rs_module, devices) -> bool:
         print(Colors.warn("无设备可检查，跳过此步骤"))
         return True
 
-    # camera_info 字段列表
-    info_fields = [
+    # camera_info 核心字段（所有设备都应支持）
+    core_info_fields = [
         ("name", rs_module.camera_info.name),
         ("serial_number", rs_module.camera_info.serial_number),
         ("firmware_version", rs_module.camera_info.firmware_version),
@@ -206,18 +207,30 @@ def check_device_details(rs_module, devices) -> bool:
         ("physical_port", rs_module.camera_info.physical_port),
         ("product_id", rs_module.camera_info.product_id),
         ("product_line", rs_module.camera_info.product_line),
+    ]
+    # 可选字段（某些设备/固件版本可能不支持）
+    optional_info_fields = [
         ("recommended_firmware_version", rs_module.camera_info.recommended_firmware_version),
     ]
 
     for i, device in enumerate(devices):
         print(f"\n  --- 设备 #{i} ---")
 
-        for label, info_enum in info_fields:
+        # 打印核心字段
+        for label, info_enum in core_info_fields:
             try:
                 value = device.get_info(info_enum)
                 print(f"    {label:<30}: {value}")
             except Exception as e:
                 print(Colors.warn(f"    {label:<30}: [获取失败] {e}"))
+
+        # 打印可选字段
+        for label, info_enum in optional_info_fields:
+            try:
+                value = device.get_info(info_enum)
+                print(f"    {label:<30}: {value}")
+            except Exception:
+                pass  # 可选字段获取失败不打印
 
         # 传感器信息
         print("    --- Sensors ---")
@@ -315,7 +328,12 @@ def check_pipeline(rs_module, devices) -> bool:
         # 4.5 尝试读取一帧
         print("    等待帧 (timeout=5000ms) ...")
         try:
-            frames = pipe.wait_for_frames(timeout_ms=5000)
+            # 某些 Jetson/apt 安装的旧版 pyrealsense2 不支持 timeout_ms 关键字参数
+            # 先尝试位置参数，失败再尝试无参数（使用默认超时）
+            try:
+                frames = pipe.wait_for_frames(5000)
+            except TypeError:
+                frames = pipe.wait_for_frames()
             color_frame = frames.get_color_frame()
             if color_frame:
                 data = color_frame.get_data()
@@ -487,10 +505,19 @@ def check_usb_topology() -> None:
     for line in out.strip().split("\n"):
         if "8086" in line:
             parts = line.split()
-            if len(parts) >= 2:
+            # lsusb 格式: "Bus 002 Device 003: ID 8086:0b3a ..."
+            bus = None
+            dev = None
+            if len(parts) >= 4 and parts[0] == "Bus" and parts[2] == "Device":
+                bus = parts[1]
+                dev = parts[3].rstrip(":")
+            elif len(parts) >= 2 and ":" in parts[1]:
+                # 备用格式: "002:003" 等
                 bus_dev = parts[1].rstrip(":")
                 bus = bus_dev.split(":")[0]
                 dev = bus_dev.split(":")[1]
+
+            if bus is not None and dev is not None:
                 speed_file = Path(f"/sys/bus/usb/devices/{bus}-{dev}/speed")
                 if speed_file.exists():
                     speed = speed_file.read_text().strip()
@@ -504,6 +531,8 @@ def check_usb_topology() -> None:
                         print(Colors.ok(f"      -> ✅ USB3.1 (10Gbps)"))
                 else:
                     print(f"    {line}")
+            else:
+                print(f"    {line}")
 
 
 # ---------------------------------------------------------------------------
