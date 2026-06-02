@@ -35,10 +35,10 @@ def xlerobot_cameras_config() -> dict[str, CameraConfig]:
             fourcc="MJPG", warmup_s=0
         ),
 
-        "head": OpenCVCameraConfig(
-            index_or_path="/dev/v4l/by-id/usb-JoyandAI_JYU2C-2083_JYU2C-2083-2605053-video-index0",
-            fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION,
-            fourcc="MJPG", warmup_s=0
+        "head": RealSenseCameraConfig(
+            serial_number_or_name="327122072195",
+            fps=30, width=640, height=480, color_mode=ColorMode.RGB,
+            use_depth=False, rotation=Cv2Rotation.NO_ROTATION, warmup_s=1
         ),
     }
 
