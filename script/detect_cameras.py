@@ -21,6 +21,13 @@ except ImportError:
     print("  pip install opencv-python")
     sys.exit(1)
 
+try:
+    import numpy as np
+except ImportError:
+    print("错误：需要安装 numpy")
+    print("  pip install numpy")
+    sys.exit(1)
+
 
 def get_sysfs_name(video_path: str) -> str:
     """从 sysfs 读取设备名称。"""
@@ -78,6 +85,17 @@ def get_stable_links(video_path: str) -> list[str]:
     return results
 
 
+def get_video_devices() -> list[str]:
+    """获取所有可被 OpenCV 打开的视频流设备。"""
+    devices = []
+    for dev in sorted(glob.glob("/dev/video*")):
+        cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+        if cap.isOpened():
+            devices.append(dev)
+        cap.release()
+    return devices
+
+
 def show_camera(dev_path: str, index: int, total: int) -> bool:
     """
     打开一个摄像头并显示实时视频流。
@@ -87,99 +105,85 @@ def show_camera(dev_path: str, index: int, total: int) -> bool:
     usb_info = get_usb_info(dev_path)
     stable_links = get_stable_links(dev_path)
 
-    cap = cv2.VideoCapture(dev_path)
-    if not cap.isOpened():
-        # 创建黑屏显示错误信息
-        frame = None
-        status = "OPEN FAILED"
-    else:
-        status = "OK"
+    cap = cv2.VideoCapture(dev_path, cv2.CAP_V4L2)
+    opened = cap.isOpened()
 
-    info_lines = [
-        f"Device: {dev_path}",
-        f"Name: {name or '(unknown)'}",
-        f"USB: {usb_info or '(no usb info)'}",
-    ]
+    # 终端打印设备信息
+    print(f"\n{'='*50}")
+    print(f"[{index+1}/{total}] {dev_path}")
+    print(f"  名称: {name or '(unknown)'}")
+    print(f"  USB:  {usb_info or '(no usb info)'}")
     if stable_links:
-        info_lines.append("Stable links:")
+        print(f"  链接:")
         for link in stable_links:
-            info_lines.append(f"  {link}")
-    info_lines.append(f"")
-    info_lines.append(f"[{index+1}/{total}] 按任意键下一个 | 按 q 退出")
+            print(f"    {link}")
+
+    if opened:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        print(f"  分辨率: {fw}x{fh} @ {fps:.1f}fps")
+    else:
+        print(f"  状态: 无法打开")
+    print(f"{'='*50}")
+
+    consecutive_failures = 0
+    MAX_FAILURES = 10
 
     while True:
-        if cap.isOpened():
+        frame = None
+        if opened:
             ret, frame = cap.read()
             if not ret or frame is None:
+                consecutive_failures += 1
+                if consecutive_failures < MAX_FAILURES:
+                    cv2.waitKey(50)
+                    continue
                 frame = None
-                status = "FRAME ERROR"
+            else:
+                consecutive_failures = 0
+        else:
+            frame = None
 
         if frame is None:
-            # 创建黑屏
+            # 创建黑屏提示无法读取
             frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(frame, status, (200, 240), cv2.FONT_HERSHEY_SIMPLEX,
+            cv2.putText(frame, "NO SIGNAL", (180, 240), cv2.FONT_HERSHEY_SIMPLEX,
                         1.5, (0, 0, 255), 3)
-
-        # 在画面上叠加信息
-        overlay = frame.copy()
-        h, w = frame.shape[:2]
-        # 半透明黑色背景
-        cv2.rectangle(overlay, (10, 10), (min(600, w - 10), 30 + len(info_lines) * 25),
-                      (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-
-        y = 35
-        for line in info_lines:
-            cv2.putText(frame, line, (20, y), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, (0, 255, 0), 1)
-            y += 25
-
-        # 显示分辨率
-        if cap.isOpened():
-            fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            res_text = f"{fw}x{fh} @ {fps:.1f}fps"
-            cv2.putText(frame, res_text, (20, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6, (0, 255, 255), 2)
 
         cv2.imshow("Camera Test", frame)
 
         key = cv2.waitKey(30) & 0xFF
         if key == ord('q') or key == 27:  # q 或 ESC
-            if cap.isOpened():
-                cap.release()
-            cv2.destroyAllWindows()
-            return False
+            break
         elif key != 255:  # 任意其他键 -> 下一个
-            if cap.isOpened():
-                cap.release()
-            cv2.destroyAllWindows()
-            return True
+            break
+
+    if opened:
+        cap.release()
+    cv2.destroyAllWindows()
+    return key != ord('q') and key != 27
 
 
 def main():
-    video_devices = sorted(glob.glob("/dev/video*"))
+    video_devices = get_video_devices()
 
     if not video_devices:
-        print("未找到任何 /dev/video* 设备")
+        print("未找到任何 video 设备")
         sys.exit(1)
 
-    print(f"\n发现 {len(video_devices)} 个 video 设备，准备逐个预览...")
+    print(f"\n发现 {len(video_devices)} 个视频流设备，准备逐个预览...")
     print("按键说明: 任意键 = 下一个摄像头,  q/ESC = 退出\n")
-
-    try:
-        import numpy as np
-    except ImportError:
-        print("需要安装 numpy: pip install numpy")
-        sys.exit(1)
 
     for i, dev in enumerate(video_devices):
         if not show_camera(dev, i, len(video_devices)):
-            print("用户退出")
+            print("\n用户退出")
             break
     else:
-        print("所有摄像头已浏览完毕")
+        print("\n所有摄像头已浏览完毕")
 
     cv2.destroyAllWindows()
     print("结束")

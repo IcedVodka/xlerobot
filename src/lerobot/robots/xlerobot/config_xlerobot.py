@@ -23,27 +23,23 @@ from ..config import RobotConfig
 
 def xlerobot_cameras_config() -> dict[str, CameraConfig]:
     return {
-        # "left_wrist": OpenCVCameraConfig(
-        #     index_or_path="/dev/video0", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
+        "right": OpenCVCameraConfig(
+            index_or_path="/dev/v4l/by-id/usb-JoyandAI_JYU2C-2083_JYU2C-2083-2605051-video-index0",
+            fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION,
+            fourcc="MJPG", warmup_s=0
+        ),
 
-        # "right_wrist": OpenCVCameraConfig(
-        #     index_or_path="/dev/video2", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),  
+        "left": OpenCVCameraConfig(
+            index_or_path="/dev/v4l/by-id/usb-JoyandAI_JYU2C-2083_JYU2C-2083-2605052-video-index0",
+            fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION,
+            fourcc="MJPG", warmup_s=0
+        ),
 
-        # "head(RGDB)": OpenCVCameraConfig(
-        #     index_or_path="/dev/video2", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),                     
-        
-        # "head": RealSenseCameraConfig(
-        #     serial_number_or_name="125322060037",  # Replace with camera SN
-        #     fps=30,
-        #     width=1280,
-        #     height=720,
-        #     color_mode=ColorMode.BGR, # Request BGR output
-        #     rotation=Cv2Rotation.NO_ROTATION,
-        #     use_depth=True
-        # ),
+        "head": OpenCVCameraConfig(
+            index_or_path="/dev/v4l/by-id/usb-JoyandAI_JYU2C-2083_JYU2C-2083-2605053-video-index0",
+            fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION,
+            fourcc="MJPG", warmup_s=0
+        ),
     }
 
 
@@ -51,8 +47,8 @@ def xlerobot_cameras_config() -> dict[str, CameraConfig]:
 @dataclass
 class XLerobotConfig(RobotConfig):
     
-    port1: str = "/dev/ttyACM0"  # port to connect to the bus (so101 + head camera)
-    port2: str = "/dev/ttyACM1"  # port to connect to the bus (same as lekiwi setup)
+    port1: str = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D042095-if00"  # so101 + head camera
+    port2: str = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B3D045917-if00"  # same as lekiwi setup
     disable_torque_on_disconnect: bool = True
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
