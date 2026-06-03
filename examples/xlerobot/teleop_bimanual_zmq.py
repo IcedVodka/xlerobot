@@ -113,11 +113,15 @@ def resolve_arm_port(port_arg: str | None, fallback_label: str) -> str:
 
 
 # 头部按键映射 (独立按键模式)
+# NOTE(cwl): 实际电机接线与代码命名假设相反：
+#   head_motor_1 (ID=7) 实际控制 yaw（左右转），不是 pitch
+#   head_motor_2 (ID=8) 实际控制 pitch（抬头/低头），不是 yaw
+# 因此将按键映射互换，使 T/G = pitch，F/H = yaw
 HEAD_KEYMAP = {
-    "head_motor_1+": "t",
-    "head_motor_1-": "g",
-    "head_motor_2+": "f",
-    "head_motor_2-": "h",
+    "head_motor_1+": "f",   # F → yaw+（左转）
+    "head_motor_1-": "h",   # H → yaw-（右转）
+    "head_motor_2+": "t",   # T → pitch+（抬头）
+    "head_motor_2-": "g",   # G → pitch-（低头）
 }
 
 
