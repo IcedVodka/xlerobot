@@ -543,7 +543,10 @@ class XLerobot(Robot):
             base_wheel_vel["base_back_wheel"],
             base_wheel_vel["base_right_wheel"],
         )
-        
+        # NOTE(cwl): 与 send_action 保持一致，修正 body frame x/y 方向与实际的偏差
+        base_vel["x.vel"] = -base_vel["x.vel"]
+        base_vel["y.vel"] = -base_vel["y.vel"]
+
         left_arm_state = {f"{k}.pos": v for k, v in left_arm_pos.items()}
         right_arm_state = {f"{k}.pos": v for k, v in right_arm_pos.items()}
         head_state = {f"{k}.pos": v for k, v in head_pos.items()}
@@ -588,9 +591,12 @@ class XLerobot(Robot):
         right_arm_pos = {k: v for k, v in action.items() if k.startswith("right_arm_") and k.endswith(".pos")}
         head_pos = {k: v for k, v in action.items() if k.startswith("head_") and k.endswith(".pos")}
         base_goal_vel = {k: v for k, v in action.items() if k.endswith(".vel")}
+        # NOTE(cwl): 小车实际 body frame 的 x/y 正方向与代码假设相反
+        # （x+ 实际是后退，y+ 实际是右移），但 theta 方向正确。
+        # 此处对 x/y 取反以匹配实际物理方向，保持 theta 不变。
         base_wheel_goal_vel = self._body_to_wheel_raw(
-            base_goal_vel.get("x.vel", 0.0),
-            base_goal_vel.get("y.vel", 0.0),
+            -base_goal_vel.get("x.vel", 0.0),
+            -base_goal_vel.get("y.vel", 0.0),
             base_goal_vel.get("theta.vel", 0.0),
         )
         
