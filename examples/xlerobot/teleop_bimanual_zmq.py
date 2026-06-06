@@ -1,7 +1,22 @@
 #!/usr/bin/env python
 
 """
-XLerobot 双主臂远程遥操脚本 (Bimanual Leader + Keyboard + ZMQ)
+XLerobot 双主臂远程遥操脚本 (Bimanual Leader + Dual Joy-Con + ZMQ)
+
+========================================================================
+双 Joy-Con 控制底盘与头部
+========================================================================
+
+控制说明:
+    主臂遥操: 直接移动两个 SO-101 主臂，从臂会跟随
+
+    左 Joy-Con:
+        摇杆 = 头部控制 (上=抬头 下=低头 左=左转 右=右转)
+
+    右 Joy-Con:
+        摇杆 = 底盘平移 (上=前进 下=后退 左=左移 右=右移)
+        Y = 左转,  A = 右转
+        X = 底盘速度加档,  B = 底盘速度减档
 
 ========================================================================
 当前 PC 上检测到的遥操臂串口（/dev/serial/by-id/）
@@ -22,13 +37,13 @@ XLerobot 双主臂远程遥操脚本 (Bimanual Leader + Keyboard + ZMQ)
 的值即可，不需要重新标定。
 
 ========================================================================
-完整启动命令（已填好 IP、相机、串口，确认左右后直接运行）
+完整启动命令
 ========================================================================
 
 1. Orin 端先启动 Host:
     PYTHONPATH=src python -m lerobot.robots.xlerobot.xlerobot_host --robot.id=my_xlerobot
 
-2. PC 端运行本脚本（请根据上面的验证结果确认左右后再执行）：
+2. PC 端运行本脚本：
     PYTHONPATH=src python examples/xlerobot/teleop_bimanual_zmq.py \
         --remote_ip=10.42.0.192 \
         --left_arm_port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A46084903-if00 \
@@ -52,32 +67,35 @@ Step 2: 运行上面的完整命令，按终端提示操作
       elbow_flex → wrist_flex → wrist_roll → gripper）
     - 全部走完 → 按 ENTER 停止记录
     - 标定数据自动保存，下次启动会复用
-
-========================================================================
-控制说明
-========================================================================
-    主臂遥操: 直接移动两个 SO-101 主臂，从臂会跟随
-    头部控制: T/G = 抬头/低头 (pitch), F/H = 左转/右转 (yaw)
-    底盘移动: I/K = 前进/后退, J/L = 左/右平移, U/O = 左转/右转
-    速度调节: N/M = 底盘速度加/减档
-    退出:     ESC 键
 """
 
 import argparse
 import glob
 import time
 
-import numpy as np
-
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.robots.xlerobot.config_xlerobot import XLerobotClientConfig
 from lerobot.robots.xlerobot.xlerobot_client import XLerobotClient
-from lerobot.teleoperators.keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.xlebi_so101_leader import XleBiSO101Leader, XleBiSO101LeaderConfig
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 FPS = 30
+
+# 底盘速度档位
+BASE_SPEED_LEVELS = [
+    {"xy": 0.05, "theta": 15},
+    {"xy": 0.10, "theta": 30},
+    {"xy": 0.15, "theta": 45},
+    {"xy": 0.20, "theta": 60},
+    {"xy": 0.30, "theta": 90},
+]
+
+# 摇杆阈值（Joy-Con 摇杆原始值范围 0-4095，中心约 2048）
+STICK_UP_THRESHOLD = 3000     # > 此值认为摇杆向上推
+STICK_DOWN_THRESHOLD = 1000   # < 此值认为摇杆向下推
+STICK_LEFT_THRESHOLD = 1000   # < 此值认为摇杆向左推
+STICK_RIGHT_THRESHOLD = 3000  # > 此值认为摇杆向右推
 
 
 def find_stable_serial_ports() -> list[str]:
@@ -112,44 +130,146 @@ def resolve_arm_port(port_arg: str | None, fallback_label: str) -> str:
         raise RuntimeError("未检测到任何串口设备，请检查 USB 连接。")
 
 
-# 头部按键映射 (独立按键模式)
-# NOTE(cwl): 实际电机接线与代码命名假设相反：
-#   head_motor_1 (ID=7) 实际控制 yaw（左右转），不是 pitch
-#   head_motor_2 (ID=8) 实际控制 pitch（抬头/低头），不是 yaw
-# 因此将按键映射互换，使 T/G = pitch，F/H = yaw
-HEAD_KEYMAP = {
-    "head_motor_1+": "f",   # F → yaw+（左转）
-    "head_motor_1-": "h",   # H → yaw-（右转）
-    "head_motor_2+": "t",   # T → pitch+（抬头）
-    "head_motor_2-": "g",   # G → pitch-（低头）
-}
+class DualJoyconController:
+    """双 Joy-Con 控制器 — 左手柄控制头部，右手柄控制底盘。"""
 
+    def __init__(self):
+        try:
+            from joyconrobotics import JoyconRobotics
+        except ImportError:
+            print("错误: 未安装 joyconrobotics 库")
+            print("请执行: cd joycon-robotics && pip install -e . && sudo make install")
+            raise
 
-def _from_keyboard_to_head_action(
-    pressed_keys: set[str], current_head_pos: dict[str, float], step_deg: float
-) -> dict[str, float]:
-    """根据当前按键状态更新头部目标位置。
+        # 同时连接左右两个 Joy-Con
+        self.left_joycon = JoyconRobotics(
+            device="left",
+            dof_speed=[2, 2, 2, 1, 1, 1],
+            without_rest_init=True,
+        )
+        self.right_joycon = JoyconRobotics(
+            device="right",
+            dof_speed=[2, 2, 2, 1, 1, 1],
+            without_rest_init=True,
+        )
 
-    头部使用位置控制：按下按键时改变目标角度，松开后保持当前角度。
-    """
-    if HEAD_KEYMAP["head_motor_1+"] in pressed_keys:
-        current_head_pos["head_motor_1.pos"] += step_deg
-    elif HEAD_KEYMAP["head_motor_1-"] in pressed_keys:
-        current_head_pos["head_motor_1.pos"] -= step_deg
+        # 头部目标位置
+        self.head_motor_1 = 0.0  # yaw (左右转)
+        self.head_motor_2 = 0.0  # pitch (抬低头)
+        self.head_step_deg = 2.0
 
-    if HEAD_KEYMAP["head_motor_2+"] in pressed_keys:
-        current_head_pos["head_motor_2.pos"] += step_deg
-    elif HEAD_KEYMAP["head_motor_2-"] in pressed_keys:
-        current_head_pos["head_motor_2.pos"] -= step_deg
+        # 底盘速度档位
+        self.speed_level = 1  # 默认中档
 
-    return {
-        "head_motor_1.pos": current_head_pos["head_motor_1.pos"],
-        "head_motor_2.pos": current_head_pos["head_motor_2.pos"],
-    }
+        # 按键去抖状态（记录上一帧按键，用于上升沿检测）
+        self.prev_x = 0
+        self.prev_b = 0
+
+    def _read_left_buttons(self) -> dict:
+        """读取左 Joy-Con 的摇杆状态。"""
+        j = self.left_joycon.joycon
+        return {
+            "StickH": j.get_stick_left_horizontal(),
+            "StickV": j.get_stick_left_vertical(),
+        }
+
+    def _read_right_buttons(self) -> dict:
+        """读取右 Joy-Con 的按钮和摇杆状态。"""
+        j = self.right_joycon.joycon
+        return {
+            "X": j.get_button_x(),
+            "B": j.get_button_b(),
+            "Y": j.get_button_y(),
+            "A": j.get_button_a(),
+            "StickH": j.get_stick_right_horizontal(),
+            "StickV": j.get_stick_right_vertical(),
+        }
+
+    def _get_head_action(self, buttons: dict) -> dict:
+        """左 Joy-Con 摇杆控制头部（位置控制）。
+
+        注意：实际电机方向与代码命名假设相反
+              motor_2 (pitch): '-='=抬头, '+='=低头
+              motor_1 (yaw):   '-='=左转, '+='=右转
+        """
+        stick_v = buttons["StickV"]
+        stick_h = buttons["StickH"]
+
+        if stick_v > STICK_UP_THRESHOLD:
+            self.head_motor_2 -= self.head_step_deg   # 摇杆上推 = 实际抬头
+        elif stick_v < STICK_DOWN_THRESHOLD:
+            self.head_motor_2 += self.head_step_deg   # 摇杆下推 = 实际低头
+
+        if stick_h < STICK_LEFT_THRESHOLD:
+            self.head_motor_1 -= self.head_step_deg   # 摇杆左推 = 实际左转
+        elif stick_h > STICK_RIGHT_THRESHOLD:
+            self.head_motor_1 += self.head_step_deg   # 摇杆右推 = 实际右转
+
+        return {
+            "head_motor_1.pos": self.head_motor_1,
+            "head_motor_2.pos": self.head_motor_2,
+        }
+
+    def _get_base_action(self, buttons: dict) -> dict:
+        """右 Joy-Con 控制底盘。"""
+        speed = BASE_SPEED_LEVELS[self.speed_level]
+
+        x_cmd = y_cmd = theta_cmd = 0.0
+
+        # 摇杆控制平移
+        stick_v = buttons["StickV"]
+        stick_h = buttons["StickH"]
+
+        if stick_v > STICK_UP_THRESHOLD:
+            x_cmd += speed["xy"]      # 上推 = 前进
+        elif stick_v < STICK_DOWN_THRESHOLD:
+            x_cmd -= speed["xy"]      # 下推 = 后退
+
+        if stick_h < STICK_LEFT_THRESHOLD:
+            y_cmd += speed["xy"]      # 左推 = 左移
+        elif stick_h > STICK_RIGHT_THRESHOLD:
+            y_cmd -= speed["xy"]      # 右推 = 右移
+
+        # Y/A 按钮控制旋转
+        if buttons["Y"]:
+            theta_cmd += speed["theta"]   # 左转
+        if buttons["A"]:
+            theta_cmd -= speed["theta"]   # 右转
+
+        return {"x.vel": x_cmd, "y.vel": y_cmd, "theta.vel": theta_cmd}
+
+    def _update_speed(self, buttons: dict) -> None:
+        """X/B 按钮控制底盘速度档位（上升沿触发）。"""
+        if buttons["X"] and not self.prev_x:
+            self.speed_level = min(self.speed_level + 1, len(BASE_SPEED_LEVELS) - 1)
+            print(f"[JOYCON] 底盘速度加档: level {self.speed_level + 1}/{len(BASE_SPEED_LEVELS)}")
+        if buttons["B"] and not self.prev_b:
+            self.speed_level = max(self.speed_level - 1, 0)
+            print(f"[JOYCON] 底盘速度减档: level {self.speed_level + 1}/{len(BASE_SPEED_LEVELS)}")
+
+        self.prev_x = buttons["X"]
+        self.prev_b = buttons["B"]
+
+    def update(self) -> tuple[dict, dict]:
+        """更新双 Joy-Con 状态，返回 (base_action, head_action)。"""
+        left_buttons = self._read_left_buttons()
+        right_buttons = self._read_right_buttons()
+
+        head_action = self._get_head_action(left_buttons)
+        base_action = self._get_base_action(right_buttons)
+        self._update_speed(right_buttons)
+
+        return base_action, head_action
+
+    def disconnect(self):
+        if hasattr(self.left_joycon, "disconnect"):
+            self.left_joycon.disconnect()
+        if hasattr(self.right_joycon, "disconnect"):
+            self.right_joycon.disconnect()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="XLerobot bimanual teleoperation via ZMQ")
+    parser = argparse.ArgumentParser(description="XLerobot bimanual teleoperation via ZMQ with dual Joy-Con")
     parser.add_argument("--remote_ip", type=str, required=True, help="Orin IP address")
     parser.add_argument(
         "--left_arm_port",
@@ -174,7 +294,7 @@ def main():
     parser.add_argument("--list_ports", action="store_true", help="仅列出可用串口并退出")
     parser.add_argument("--fps", type=int, default=FPS, help="Control loop frequency (Hz)")
     parser.add_argument(
-        "--head_step_deg", type=float, default=2.0, help="Head motor step size in degrees per keypress"
+        "--head_step_deg", type=float, default=2.0, help="Head motor step size in degrees per frame"
     )
     parser.add_argument(
         "--camera_names",
@@ -241,63 +361,56 @@ def main():
     )
     leader = XleBiSO101Leader(leader_config)
 
-    # 初始化键盘遥操
-    keyboard = KeyboardTeleop(KeyboardTeleopConfig(id="keyboard"))
+    # 初始化双 Joy-Con 控制器
+    print("[INFO] 初始化双 Joy-Con 控制器（左=头部，右=底盘）...")
+    joycon = DualJoyconController()
 
     # 连接所有设备
     print("[INFO] Connecting to remote robot...")
     robot.connect()
     print("[INFO] Connecting to leader arms...")
     leader.connect()
-    print("[INFO] Connecting to keyboard...")
-    keyboard.connect()
 
-    if not robot.is_connected or not leader.is_connected or not keyboard.is_connected:
+    if not robot.is_connected or not leader.is_connected:
         raise RuntimeError("Failed to connect one or more devices!")
 
     # 启动 rerun 可视化界面（图像、状态曲线等会自动显示）
-    init_rerun(session_name="xlerobot_teleop_bimanual")
+    init_rerun(session_name="xlerobot_teleop_dual_joycon")
 
     print("\n[INFO] All devices connected. Starting teleop loop...")
-    print("  Arms:  Move the leader arms directly")
-    print("  Head:  T/G = pitch up/down,  F/H = yaw left/right")
-    print("  Base:  I/K = forward/back,   J/L = left/right,  U/O = rotate")
-    print("  Speed: N/M = speed +/-")
-    print("  Exit:  ESC\n")
+    print("  Arms:       Move the leader arms directly")
+    print("  Left Joy-Con (头部):")
+    print("    摇杆 = 抬头/低头/左转/右转")
+    print("  Right Joy-Con (底盘):")
+    print("    摇杆 = 前进/后退/左移/右移")
+    print("    Y/A  = 左转/右转")
+    print("    X/B  = 速度加档/减档")
+    print("  Exit:       Ctrl+C\n")
 
-    # 头部当前目标位置状态 (会在按键时累加/累减)
-    current_head_pos = {"head_motor_1.pos": 0.0, "head_motor_2.pos": 0.0}
+    # 设置头部步长
+    joycon.head_step_deg = args.head_step_deg
 
     try:
         while True:
             t0 = time.perf_counter()
 
-            # 1. 获取主臂动作 (包含 left_arm_*.pos / right_arm_*.pos，头部和底盘为占位 0)
+            # 1. 获取主臂动作
             leader_action = leader.get_action()
 
-            # 2. 获取键盘按键状态
-            keys = keyboard.get_action()
-            pressed_keys = set(keys.keys())
+            # 2. 获取双 Joy-Con 控制数据
+            base_action, head_action = joycon.update()
 
-            # 3. 键盘 → 底盘动作 (复用 XLerobotClient 内置方法)
-            keyboard_keys_array = np.array(list(pressed_keys))
-            base_action = robot._from_keyboard_to_base_action(keyboard_keys_array) or {}
-
-            # 4. 键盘 → 头部动作
-            head_action = _from_keyboard_to_head_action(pressed_keys, current_head_pos, args.head_step_deg)
-
-            # 5. 合并动作：手臂来自主臂，底盘和头部来自键盘
-            #    base_action / head_action 会覆盖 leader_action 中的占位 0 值
+            # 3. 合并动作：手臂来自主臂，底盘和头部来自 Joy-Con
             action = {**leader_action, **base_action, **head_action}
 
-            # 6. 通过 ZMQ 发送到 Orin 端的机器人
+            # 4. 通过 ZMQ 发送到 Orin 端的机器人
             robot.send_action(action)
 
-            # 7. 接收观测（包含图像，由 rerun 自动显示）
+            # 5. 接收观测（包含图像，由 rerun 自动显示）
             obs = robot.get_observation()
             log_rerun_data(observation=obs, action=action)
 
-            # 8. 维持目标频率
+            # 6. 维持目标频率
             dt = time.perf_counter() - t0
             precise_sleep(max(1.0 / args.fps - dt, 0.0))
 
@@ -305,12 +418,11 @@ def main():
         print("\n[INFO] Interrupted by user")
     finally:
         print("[INFO] Disconnecting...")
+        joycon.disconnect()
         if leader.is_connected:
             leader.disconnect()
         if robot.is_connected:
             robot.disconnect()
-        if keyboard.is_connected:
-            keyboard.disconnect()
         print("[INFO] Done")
 
 

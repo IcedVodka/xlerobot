@@ -63,8 +63,10 @@ from teleop.src.teleop_record import TeleopRecordManager
 
 try:
     from joyconrobotics import JoyconRobotics
+    from joyconrobotics.device import get_device_ids, get_R_ids, get_L_ids
 except ImportError:
     JoyconRobotics = None
+    get_device_ids = get_R_ids = get_L_ids = None
     logging.warning("joyconrobotics not installed. Joy-Con control will not work.")
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,39 @@ BASE_MAX_SPEED = 3.0
 
 def find_stable_serial_ports() -> list[str]:
     return sorted(glob.glob("/dev/serial/by-id/*"))
+
+
+def scan_joycons() -> dict:
+    """扫描并列出所有连接的 Joy-Con，返回 {serial: info} 字典。"""
+    if get_device_ids is None:
+        return {}
+    devices = get_device_ids(debug=False)
+    result = {}
+    for vid, pid, serial in devices:
+        side = "RIGHT" if pid == 0x2007 else "LEFT"
+        result[serial] = {"vendor_id": vid, "product_id": pid, "side": side, "serial": serial}
+    return result
+
+
+def pick_joycon(side: str, preferred_serial: str | None = None) -> tuple:
+    """选择一个 Joy-Con 返回 (vendor_id, product_id, serial)。
+
+    side: "left" 或 "right"
+    preferred_serial: 优先使用的 serial，None 则自动选第一个
+    """
+    all_devices = scan_joycons()
+    candidates = [d for d in all_devices.values() if d["side"].lower() == side.lower()]
+    if not candidates:
+        raise RuntimeError(f"未检测到任何 {side.upper()} Joy-Con，请检查蓝牙连接。")
+
+    if preferred_serial:
+        for c in candidates:
+            if c["serial"] == preferred_serial:
+                return (c["vendor_id"], c["product_id"], c["serial"])
+        print(f"[WARN] 未找到指定 serial '{preferred_serial}' 的 {side.upper()} Joy-Con，"
+              f"将使用第一个可用的 ({candidates[0]['serial']})")
+
+    return (candidates[0]["vendor_id"], candidates[0]["product_id"], candidates[0]["serial"])
 
 
 def resolve_arm_port(port_arg: str | None, fallback_label: str) -> str:
@@ -101,7 +136,8 @@ def resolve_arm_port(port_arg: str | None, fallback_label: str) -> str:
 class JoyconController:
     """封装 Joy-Con 输入，提供统一的头部和底盘控制接口。"""
 
-    def __init__(self, device: str, is_right: bool = True):
+    def __init__(self, device, is_right: bool = True):
+        """device: str ("right"/"left") 或 tuple (vendor_id, product_id, serial)"""
         if JoyconRobotics is None:
             raise ImportError("joyconrobotics not installed. Install with: pip install joyconrobotics")
         self.joycon = JoyconRobotics(device, dof_speed=[2, 2, 2, 1, 1, 1])
@@ -297,6 +333,9 @@ def parse_args():
     parser.add_argument("--left_arm_port", type=str, default=None)
     parser.add_argument("--right_arm_port", type=str, default=None)
     parser.add_argument("--list_ports", action="store_true")
+    parser.add_argument("--list_joycons", action="store_true", help="列出所有已连接的 Joy-Con 设备")
+    parser.add_argument("--left_joycon_serial", type=str, default=None, help="指定左 Joy-Con 的 serial（如未指定则自动选择第一个）")
+    parser.add_argument("--right_joycon_serial", type=str, default=None, help="指定右 Joy-Con 的 serial（如未指定则自动选择第一个）")
     parser.add_argument("--camera_names", type=str, default="")
     parser.add_argument("--camera_width", type=int, default=640)
     parser.add_argument("--camera_height", type=int, default=480)
@@ -322,6 +361,23 @@ def main():
         print("[ERROR] joyconrobotics not installed. Install with: pip install joyconrobotics")
         return
 
+    # 扫描 Joy-Con
+    if args.list_joycons:
+        print("=" * 50)
+        print("已连接的 Joy-Con 设备:")
+        devices = scan_joycons()
+        if not devices:
+            print("  (未检测到任何 Joy-Con)")
+        else:
+            for serial, info in devices.items():
+                marker = ""
+                if args.left_joycon_serial and serial == args.left_joycon_serial:
+                    marker = " [将用作左 Joy-Con]"
+                elif args.right_joycon_serial and serial == args.right_joycon_serial:
+                    marker = " [将用作右 Joy-Con]"
+                print(f"  [{info['side']}] serial={serial}{marker}")
+        return
+
     if args.list_ports:
         print("=" * 50)
         print("可用稳定串口路径:")
@@ -344,6 +400,13 @@ def main():
                 index_or_path="", fps=args.fps, width=args.camera_width, height=args.camera_height,
             )
 
+    # 选择 Joy-Con（支持跨对使用）
+    print("[INFO] Scanning Joy-Con devices...")
+    left_joycon_id = pick_joycon("left", args.left_joycon_serial)
+    right_joycon_id = pick_joycon("right", args.right_joycon_serial)
+    print(f"[INFO] 左 Joy-Con: serial={left_joycon_id[2]}")
+    print(f"[INFO] 右 Joy-Con: serial={right_joycon_id[2]}")
+
     # 初始化设备
     robot_config = XLerobotClientConfig(
         remote_ip=args.remote_ip,
@@ -359,8 +422,8 @@ def main():
     leader = XleBiSO101Leader(leader_config)
 
     print("[INFO] Initializing Joy-Con controllers...")
-    joycon_right = JoyconController("right", is_right=True)
-    joycon_left = JoyconController("left", is_right=False)
+    joycon_right = JoyconController(right_joycon_id, is_right=True)
+    joycon_left = JoyconController(left_joycon_id, is_right=False)
 
     print("[INFO] Connecting to remote robot...")
     robot.connect()
