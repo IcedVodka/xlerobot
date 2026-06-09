@@ -30,9 +30,9 @@ XLerobot 双主臂远程遥操脚本 (Bimanual Leader + Keyboard + ZMQ) + 可选
 两种模式
 ========================================================================
 
---mode arms_only :
+--mode upper_body :
     控制双臂+头部，底盘不动（置零），数据集中记录双臂+头部数据。
-    适合训练仅控制双臂的策略（头部作为场景变化来源）。
+    适合训练仅控制上半身的策略（头部作为场景变化来源）。
 
 --mode full_body (默认):
     全身控制（双臂+头部+底盘），数据集中记录全身数据。
@@ -298,8 +298,8 @@ def main():
         "--mode",
         type=str,
         default="full_body",
-        choices=["arms_only", "full_body"],
-        help="录制模式：arms_only 采集双臂+头部数据（底盘不动），full_body 采集全身数据",
+        choices=["upper_body", "full_body"],
+        help="录制模式：upper_body 采集双臂+头部数据（底盘不动），full_body 采集全身数据",
     )
     parser.add_argument("--dataset_root", type=str, default=None, help="数据集本地存储根目录")
     parser.add_argument(
@@ -417,9 +417,9 @@ def main():
         obs_features = hw_to_dataset_features(robot.observation_features, "observation")
         full_features = {**action_features, **obs_features}
 
-        if args.mode == "arms_only":
+        if args.mode == "upper_body":
             dataset_features = filter_arm_head_features(full_features)
-            print("[INFO] arms_only 模式：数据集包含双臂 + 头部字段")
+            print("[INFO] upper_body 模式：数据集包含双臂 + 头部字段")
         else:
             dataset_features = full_features
             print("[INFO] full_body 模式：数据集包含全身字段")
@@ -481,7 +481,7 @@ def main():
             kb_ev = kb_listener.consume_events()
             sync_episode_events(kb_ev, events)
 
-            if args.mode == "arms_only":
+            if args.mode == "upper_body":
                 base_action = {}
 
             return merge_actions(
