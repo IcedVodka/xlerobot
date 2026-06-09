@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def filter_arm_only_features(features: dict) -> dict:
-    """从完整 dataset features 中仅保留双臂相关字段。
+def filter_arm_head_features(features: dict) -> dict:
+    """从完整 dataset features 中保留双臂 + 头部字段。
 
     对 ``action`` 和 ``observation.state`` 条目，只保留 names 列表中以
-    ``left_arm_`` 或 ``right_arm_`` 开头的字段；图像字段全部保留；
-    DEFAULT_FEATURES（timestamp、frame_index 等）也保留。
+    ``left_arm_``、``right_arm_`` 或 ``head_motor_`` 开头的字段；
+    图像字段全部保留；DEFAULT_FEATURES（timestamp、frame_index 等）也保留。
     """
     from lerobot.datasets.utils import DEFAULT_FEATURES
 
@@ -51,17 +51,17 @@ def filter_arm_only_features(features: dict) -> dict:
             filtered[key] = ft
             continue
 
-        # 对 action 和 observation.state 只保留双臂字段
+        # 对 action 和 observation.state 只保留双臂 + 头部字段
         if key in ("action", "observation.state"):
-            arm_names = [
+            arm_head_names = [
                 name for name in ft.get("names", [])
-                if name.startswith(("left_arm_", "right_arm_"))
+                if name.startswith(("left_arm_", "right_arm_", "head_motor_"))
             ]
-            if arm_names:
+            if arm_head_names:
                 filtered[key] = {
                     "dtype": ft["dtype"],
-                    "shape": (len(arm_names),),
-                    "names": arm_names,
+                    "shape": (len(arm_head_names),),
+                    "names": arm_head_names,
                 }
             continue
 

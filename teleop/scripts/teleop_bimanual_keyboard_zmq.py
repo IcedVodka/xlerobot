@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 """
-XLerobot 双主臂远程遥操脚本 (Bimanual Leader + Keyboard + ZMQ)
+XLerobot 双主臂远程遥操脚本 (Bimanual Leader + Keyboard + ZMQ) + 可选录制
 
 ========================================================================
 键盘控制底盘与头部
@@ -19,6 +19,23 @@ XLerobot 双主臂远程遥操脚本 (Bimanual Leader + Keyboard + ZMQ)
         J = 左移,  L = 右移
         U = 左转,  O = 右转
         N = 速度加档,  M = 速度减档
+
+录制控制（数字键）：
+    1 = 开始 / 跳过重置 并进入下一轮
+    2 = 结束当前 episode
+    3 = 重新录制当前 episode
+    4 = 完全退出录制流程
+
+========================================================================
+两种模式
+========================================================================
+
+--mode arms_only :
+    控制双臂+头部，底盘不动（置零），数据集中记录双臂+头部数据。
+    适合训练仅控制双臂的策略（头部作为场景变化来源）。
+
+--mode full_body (默认):
+    全身控制（双臂+头部+底盘），数据集中记录全身数据。
 
 ========================================================================
 当前 PC 上检测到的遥操臂串口（/dev/serial/by-id/）
@@ -45,14 +62,24 @@ XLerobot 双主臂远程遥操脚本 (Bimanual Leader + Keyboard + ZMQ)
 1. Orin 端先启动 Host:
     PYTHONPATH=src python -m lerobot.robots.xlerobot.xlerobot_host --robot.id=my_xlerobot
 
-2. PC 端运行本脚本：
+2. PC 端运行本脚本（纯遥操，不录制）：
     PYTHONPATH=src python teleop/scripts/teleop_bimanual_keyboard_zmq.py \
         --remote_ip=10.42.0.192 \
         --left_arm_port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A46084903-if00 \
         --right_arm_port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA093104-if00 \
         --camera_names=left,right,head
 
-3. 仅查看可用串口：
+3. PC 端运行本脚本（录制数据 + 可视化）：
+    PYTHONPATH=src python teleop/scripts/teleop_bimanual_keyboard_zmq.py \
+        --remote_ip=10.42.0.192 \
+        --left_arm_port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A46084903-if00 \
+        --right_arm_port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA093104-if00 \
+        --camera_names=left,right,head \
+        --repo_id=my_keyboard_dataset \
+        --mode=full_body \
+        --display_data
+
+4. 仅查看可用串口：
     PYTHONPATH=src python teleop/scripts/teleop_bimanual_keyboard_zmq.py --list_ports
 
 ========================================================================
@@ -73,19 +100,44 @@ Step 2: 运行上面的完整命令，按终端提示操作
 
 import argparse
 import glob
+import logging
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
+# 把 teleop/src 加入路径，以便导入共用工具
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from teleop_record_utils import (
+    EpisodeKeyboardListener,
+    filter_arm_head_features,
+    merge_actions,
+    run_recording_session,
+    sync_episode_events,
+)
+
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.utils import hw_to_dataset_features
+from lerobot.processor import make_default_processors
 from lerobot.robots.xlerobot.config_xlerobot import XLerobotClientConfig
 from lerobot.robots.xlerobot.xlerobot_client import XLerobotClient
 from lerobot.teleoperators.keyboard import KeyboardTeleop, KeyboardTeleopConfig
 from lerobot.teleoperators.xlebi_so101_leader import XleBiSO101Leader, XleBiSO101LeaderConfig
+from lerobot.utils.control_utils import sanity_check_dataset_robot_compatibility
 from lerobot.utils.robot_utils import precise_sleep
+from lerobot.utils.utils import log_say
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
+logger = logging.getLogger(__name__)
+
 FPS = 30
+NUM_EPISODES = 50
+EPISODE_TIME_SEC = 300
+RESET_TIME_SEC = 10
+TASK_DESCRIPTION = "My task description"
 
 
 # ---------------------------------------------------------------------------
@@ -234,11 +286,50 @@ def main():
     parser.add_argument(
         "--camera_height", type=int, default=480, help="Expected camera image height"
     )
+
+    # 录制相关参数
+    parser.add_argument(
+        "--repo_id",
+        type=str,
+        default=None,
+        help="数据集标识名称，指定时进入录制模式，不指定时仅遥操",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="full_body",
+        choices=["arms_only", "full_body"],
+        help="录制模式：arms_only 采集双臂+头部数据（底盘不动），full_body 采集全身数据",
+    )
+    parser.add_argument("--dataset_root", type=str, default=None, help="数据集本地存储根目录")
+    parser.add_argument(
+        "--num_episodes", type=int, default=NUM_EPISODES, help="录制 episode 数量"
+    )
+    parser.add_argument(
+        "--episode_time_s", type=int, default=EPISODE_TIME_SEC, help="每 episode 最大时长（秒）"
+    )
+    parser.add_argument(
+        "--reset_time_s", type=int, default=RESET_TIME_SEC, help="episode 间重置时间（秒）"
+    )
+    parser.add_argument("--task_description", type=str, default=TASK_DESCRIPTION, help="任务描述")
+    parser.add_argument(
+        "--resume", action="store_true", help="在已有数据集上继续录制"
+    )
+    parser.add_argument(
+        "--display_data", action="store_true", help="启用 rerun 可视化"
+    )
+    parser.add_argument("--verbose", action="store_true", help="显示详细日志")
     args = parser.parse_args()
 
-    # 仅列出串口时不需要 remote_ip
-    if not args.list_ports and not args.remote_ip:
-        parser.error("--remote_ip is required (unless using --list_ports)")
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    # 仅列出串口时不需要 remote_ip/repo_id
+    if not args.list_ports:
+        if not args.remote_ip:
+            parser.error("--remote_ip is required (unless using --list_ports)")
 
     # 仅列出串口并退出
     if args.list_ports:
@@ -308,9 +399,127 @@ def main():
     if not robot.is_connected or not leader.is_connected:
         raise RuntimeError("Failed to connect one or more devices!")
 
-    # 启动 rerun 可视化界面（图像、状态曲线等会自动显示）
-    init_rerun(session_name="xlerobot_teleop_keyboard")
+    # 条件启动 rerun 可视化
+    if args.display_data:
+        init_rerun(session_name="xlerobot_teleop_keyboard")
 
+    # ========================================================================
+    # 录制模式
+    # ========================================================================
+    if args.repo_id:
+        print(f"[INFO] 录制模式: {args.mode}")
+
+        # 处理管线
+        teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+
+        # 数据集 features
+        action_features = hw_to_dataset_features(robot.action_features, "action")
+        obs_features = hw_to_dataset_features(robot.observation_features, "observation")
+        full_features = {**action_features, **obs_features}
+
+        if args.mode == "arms_only":
+            dataset_features = filter_arm_head_features(full_features)
+            print("[INFO] arms_only 模式：数据集包含双臂 + 头部字段")
+        else:
+            dataset_features = full_features
+            print("[INFO] full_body 模式：数据集包含全身字段")
+
+        # 创建/加载数据集
+        if args.resume:
+            dataset = LeRobotDataset(
+                args.repo_id,
+                root=args.dataset_root,
+                batch_encoding_size=1,
+            )
+            dataset.start_image_writer(num_threads=4)
+            sanity_check_dataset_robot_compatibility(dataset, robot, args.fps, dataset_features)
+        else:
+            dataset = LeRobotDataset.create(
+                repo_id=args.repo_id,
+                fps=args.fps,
+                features=dataset_features,
+                robot_type=robot.name,
+                use_videos=True,
+                image_writer_threads=4,
+                root=args.dataset_root,
+            )
+
+        # 键盘 episode 控制器（1=开始 2=结束 3=重录 4=退出）
+        kb_listener = EpisodeKeyboardListener()
+        kb_listener.start()
+        events = {
+            "exit_early": False,
+            "rerecord_episode": False,
+            "stop_recording": False,
+            "discard_current_episode": False,
+        }
+
+        print("\n[INFO] All devices connected. Starting recording loop...")
+        print("  Arms:       Move the leader arms directly")
+        print("  Head (方向键):")
+        print("    ↑/↓ = 抬头/低头,  ←/→ = 左转/右转")
+        print("  Base (键盘):")
+        print("    I/K = 前进/后退, J/L = 左移/右移")
+        print("    U/O = 左转/右转, N/M = 速度加档/减档")
+        print("  Recording controls:")
+        print("    1 = 开始/跳过重置")
+        print("    2 = 结束当前 episode")
+        print("    3 = 重新录制")
+        print("    4 = 完全退出")
+        print("  Exit:       Ctrl+C\n")
+
+        # -------------------------------------------------------------------
+        # build_action 回调
+        # -------------------------------------------------------------------
+        def build_action(obs: dict) -> dict:
+            leader_action = leader.get_action()
+            head_action = head_controller.get_head_action()
+            pressed_keys = np.array(list(keyboard_teleop.get_action().keys()))
+            base_action = robot._from_keyboard_to_base_action(pressed_keys) or {}
+
+            # 处理键盘 episode 控制事件
+            kb_ev = kb_listener.consume_events()
+            sync_episode_events(kb_ev, events)
+
+            if args.mode == "arms_only":
+                base_action = {}
+
+            return merge_actions(
+                leader_action=leader_action,
+                head_action=head_action,
+                base_action=base_action,
+                observation=obs,
+                action_features=robot.action_features,
+            )
+
+        try:
+            run_recording_session(
+                robot=robot,
+                leader=leader,
+                events=events,
+                dataset=dataset,
+                args=args,
+                teleop_action_processor=teleop_action_processor,
+                robot_action_processor=robot_action_processor,
+                robot_observation_processor=robot_observation_processor,
+                build_action=build_action,
+            )
+        finally:
+            print("[INFO] Disconnecting...")
+            kb_listener.stop()
+            head_controller.stop()
+            if keyboard_teleop.is_connected:
+                keyboard_teleop.disconnect()
+            if leader.is_connected:
+                leader.disconnect()
+            if robot.is_connected:
+                robot.disconnect()
+            print("[INFO] Done")
+        return
+
+    # ========================================================================
+    # 纯遥操模式（不录制）
+    # ========================================================================
     print("\n[INFO] All devices connected. Starting teleop loop...")
     print("  Arms:       Move the leader arms directly")
     print("  Head (方向键):")
@@ -342,7 +551,8 @@ def main():
 
             # 6. 接收观测（包含图像，由 rerun 自动显示）
             obs = robot.get_observation()
-            log_rerun_data(observation=obs, action=action)
+            if args.display_data:
+                log_rerun_data(observation=obs, action=action)
 
             # 7. 维持目标频率
             dt = time.perf_counter() - t0

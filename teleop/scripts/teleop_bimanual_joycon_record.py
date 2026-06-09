@@ -32,7 +32,7 @@ XLerobot 双臂遥操 + 双 Joy-Con 控制头部和底盘 + 数据采集
 ========================================================================
 
 --mode arms_only :
-    控制双臂+头部，底盘不动（置零），数据集中只记录双臂数据。
+    控制双臂+头部，底盘不动（置零），数据集中记录双臂+头部数据。
     适合训练仅控制双臂的策略（头部作为场景变化来源）。
 
 --mode full_body (默认):
@@ -85,7 +85,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from teleop_record_utils import (
     EpisodeKeyboardListener,
     clear_phase_exit_event,
-    filter_arm_only_features,
+    filter_arm_head_features,
     make_round_prompt,
     merge_actions,
     record_loop,
@@ -368,7 +368,7 @@ def main():
         type=str,
         default="full_body",
         choices=["arms_only", "full_body"],
-        help="录制模式：arms_only 只采双臂数据，full_body 采集全身数据",
+        help="录制模式：arms_only 采集双臂+头部数据（底盘不动），full_body 采集全身数据",
     )
     parser.add_argument("--repo_id", type=str, default=None, help="数据集标识名称")
     parser.add_argument(
@@ -462,8 +462,8 @@ def main():
     full_features = {**action_features, **obs_features}
 
     if args.mode == "arms_only":
-        dataset_features = filter_arm_only_features(full_features)
-        print("[INFO] arms_only 模式：数据集仅包含双臂字段")
+        dataset_features = filter_arm_head_features(full_features)
+        print("[INFO] arms_only 模式：数据集包含双臂 + 头部字段")
     else:
         dataset_features = full_features
         print("[INFO] full_body 模式：数据集包含全身字段")
