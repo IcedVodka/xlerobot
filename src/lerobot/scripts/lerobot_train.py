@@ -23,6 +23,7 @@ import torch
 from accelerate import Accelerator
 from termcolor import colored
 from torch.optim import Optimizer
+from torch.utils.tensorboard import SummaryWriter
 
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
@@ -193,6 +194,14 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         wandb_logger = None
         if is_main_process:
             logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+
+    # Initialize TensorBoard writer (local, no cloud upload)
+    tb_writer = None
+    if is_main_process:
+        tb_log_dir = cfg.output_dir / "logs"
+        tb_writer = SummaryWriter(log_dir=tb_log_dir)
+        logging.info(colored("TensorBoard logs:", "yellow", attrs=["bold"]) + f" {tb_log_dir}")
+        logging.info(f"  View with: tensorboard --logdir={tb_log_dir}")
 
     if cfg.seed is not None:
         set_seed(cfg.seed, accelerator=accelerator)
@@ -408,21 +417,25 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
         if is_log_step:
             logging.info(train_tracker)
+            log_dict = train_tracker.to_dict()
+            if output_dict:
+                log_dict.update(output_dict)
+            # Log RA-BC statistics if enabled
+            if rabc_weights is not None:
+                rabc_stats = rabc_weights.get_stats()
+                log_dict.update(
+                    {
+                        "rabc_delta_mean": rabc_stats["delta_mean"],
+                        "rabc_delta_std": rabc_stats["delta_std"],
+                        "rabc_num_frames": rabc_stats["num_frames"],
+                    }
+                )
             if wandb_logger:
-                wandb_log_dict = train_tracker.to_dict()
-                if output_dict:
-                    wandb_log_dict.update(output_dict)
-                # Log RA-BC statistics if enabled
-                if rabc_weights is not None:
-                    rabc_stats = rabc_weights.get_stats()
-                    wandb_log_dict.update(
-                        {
-                            "rabc_delta_mean": rabc_stats["delta_mean"],
-                            "rabc_delta_std": rabc_stats["delta_std"],
-                            "rabc_num_frames": rabc_stats["num_frames"],
-                        }
-                    )
-                wandb_logger.log_dict(wandb_log_dict, step)
+                wandb_logger.log_dict(log_dict, step)
+            if tb_writer:
+                for key, value in log_dict.items():
+                    if isinstance(value, (int, float)):
+                        tb_writer.add_scalar(f"train/{key}", value, step)
             train_tracker.reset_averages()
 
         if cfg.save_checkpoint and is_saving_step:
@@ -491,6 +504,10 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                     wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                if tb_writer:
+                    for key, value in eval_tracker.to_dict().items():
+                        if isinstance(value, (int, float)):
+                            tb_writer.add_scalar(f"eval/{key}", value, step)
 
             accelerator.wait_for_everyone()
 
@@ -499,6 +516,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
     if is_main_process:
         logging.info("End of training")
+        if tb_writer:
+            tb_writer.close()
+            logging.info(f"TensorBoard logs saved to: {tb_log_dir}")
 
         if cfg.policy.push_to_hub:
             unwrapped_policy = accelerator.unwrap_model(policy)

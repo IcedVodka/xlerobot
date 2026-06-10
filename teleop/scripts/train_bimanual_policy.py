@@ -123,11 +123,11 @@ def main():
         cmd.append(f"--dataset.root={dataset_path}")
 
     # 图像增强
-    cmd.append(f"--dataset.image_transforms.enable={args.image_transforms}")
+    cmd.append(f"--dataset.image_transforms.enable={str(args.image_transforms).lower()}")
 
     # Resume
     if args.resume:
-        cmd.append("--resume")
+        cmd.append("--resume=true")
         if args.config_path:
             cmd.append(f"--config_path={args.config_path}")
 

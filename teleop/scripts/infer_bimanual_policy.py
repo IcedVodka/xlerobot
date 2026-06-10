@@ -28,7 +28,7 @@ XLerobot 双臂策略推理部署脚本 (PC端)
 
 2. PC 端运行推理脚本（dataset_repo_id 自动从训练配置推断）：
     PYTHONPATH=src python teleop/scripts/infer_bimanual_policy.py \
-        --model_path=outputs/train/my_keyboard_act/checkpoints/050000/pretrained_model \
+        --model_path=outputs/train/my_keyboard_act/checkpoints/last/pretrained_model \
         --remote_ip=10.42.0.192 \
         --camera_names=left,right,head
 
