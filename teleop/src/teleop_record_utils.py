@@ -127,6 +127,7 @@ def record_loop(
     build_action: Callable,
     extra_quit_check: Callable | None = None,
     post_frame_callback: Callable | None = None,
+    control_mode_provider: Callable[[], int] | None = None,
 ):
     """单 episode 录制/遥操循环。
 
@@ -144,6 +145,9 @@ def record_loop(
         build_action: 回调函数 ``build_action(obs) -> action_dict``，
             由调用方定义如何合并 leader/head/base 动作。
         extra_quit_check: 可选回调，每帧调用；返回 True 则触发退出。
+        control_mode_provider: 可选回调，每帧调用以获取当前控制模式，
+            用于写入 ``control_mode`` 字段（例如 0=autonomous, 1=intervention,
+            2=teleop_demo）。dataset 为 ``None`` 时不写入。
     """
     timestamp = 0.0
     start_episode_t = time.perf_counter()
@@ -181,6 +185,8 @@ def record_loop(
                     dataset.features, act_processed_teleop, prefix="action"
                 )
                 frame = {**observation_frame, **action_frame, "task": single_task}
+                if control_mode_provider is not None:
+                    frame["control_mode"] = np.array([control_mode_provider()], dtype=np.int64)
                 dataset.add_frame(frame)
 
             # 5. 可视化
@@ -339,10 +345,18 @@ def run_recording_session(
     robot_observation_processor,
     build_action: Callable,
     extra_quit_check: Callable | None = None,
+    control_mode_provider: Callable[[], int] | None = None,
+    episode_start_callback: Callable | None = None,
 ):
     """跑完整录制会话：episode 循环 + 重置阶段 + 重录/保存逻辑。
 
     与 ``record_remote_bi_so101_leader_keyboard.py`` 的主循环逻辑保持一致。
+
+    Args:
+        control_mode_provider: 可选回调，透传给 ``record_loop``，
+            用于在 dataset 中写入 ``control_mode`` 字段。
+        episode_start_callback: 可选回调，在每个 episode 的录制阶段开始前调用，
+            例如用于重置策略内部状态。
     """
     recorded_episodes = 0
 
@@ -359,6 +373,8 @@ def run_recording_session(
                 log_say(prompt)
 
                 # ---- 录制阶段 ----
+                if episode_start_callback is not None:
+                    episode_start_callback()
                 record_loop(
                     robot=robot,
                     leader=leader,
@@ -373,6 +389,7 @@ def run_recording_session(
                     robot_observation_processor=robot_observation_processor,
                     build_action=build_action,
                     extra_quit_check=extra_quit_check,
+                    control_mode_provider=control_mode_provider,
                 )
 
                 # ---- 重置阶段（如果还需要继续） ----
@@ -397,6 +414,7 @@ def run_recording_session(
                         robot_observation_processor=robot_observation_processor,
                         build_action=build_action,
                         extra_quit_check=extra_quit_check,
+                        control_mode_provider=control_mode_provider,
                     )
                     clear_phase_exit_event(events)
 
