@@ -115,6 +115,21 @@ class KeyboardHeadController:
     def _on_release(self, key) -> None:
         self._pressed.pop(key, None)
 
+    def sync_to_observation(self, observation: dict) -> None:
+        """把内部目标角度对齐到当前观测，避免从自主切到介入时头部跳变。
+
+        在 autonomous 期间每帧调用，使控制器内部目标始终贴合机器人真实
+        头部角度；切到 intervention 后未按方向键时即保持当前角度。
+        """
+        if not observation:
+            return
+        v1 = observation.get("head_motor_1.pos")
+        v2 = observation.get("head_motor_2.pos")
+        if v1 is not None:
+            self.head_motor_1 = float(v1)
+        if v2 is not None:
+            self.head_motor_2 = float(v2)
+
     def get_head_action(self) -> dict[str, float]:
         from pynput import keyboard
 

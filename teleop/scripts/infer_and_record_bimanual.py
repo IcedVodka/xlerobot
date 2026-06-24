@@ -10,10 +10,12 @@ XLerobot 双臂策略推理 + 人类介入纠正采集脚本
 在 PC 端同时加载训练好的 LeRobot 策略模型并连接遥操作主臂，通过 ZMQ
 与 Orin 上的 xlerobot_host 通信。
 
-支持三种控制模式（按 Space 键循环切换）：
+支持两种控制模式：
     0 = autonomous（策略执行）
-    1 = intervention（人类接管，policy 可在后台保持状态）
-    2 = teleop_demo（纯遥操示教，policy 不运行）
+    1 = intervention（人类接管，policy 不再运行）
+
+每个 episode 从 autonomous 开始，按 Space 单向切到 intervention，本 episode 内
+不再切回；下一 episode 自动重置回 autonomous。
 
 采集的数据集会在标准 LeRobot v3 格式基础上增加一个字段：
     control_mode: int64 标量，每帧记录当前控制模式
@@ -29,17 +31,18 @@ XLerobot 双臂策略推理 + 人类介入纠正采集脚本
     PYTHONPATH=src python teleop/scripts/infer_and_record_bimanual.py \
         --model_path=outputs/train/my_keyboard_act/checkpoints/last/pretrained_model \
         --remote_ip=10.42.0.192 \
-        --repo_id=my_intervention_dataset \
+        --repo_id=my_intervention_dataset1 \
         --left_arm_port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A46084903-if00 \
         --right_arm_port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA093104-if00 \
-        --camera_names=left,right,head
+        --camera_names=left,right,head \
+        --display_data
 
 ========================================================================
 键盘控制
 ========================================================================
 
 模式切换：
-    Space = 切换 autonomous -> intervention -> teleop_demo -> autonomous
+    Space = 切到 intervention（单向，本 episode 内不再切回）
 
 Episode 控制（数字键）：
     1 = 开始 / 跳过重置 并进入下一轮
@@ -73,8 +76,6 @@ Episode 控制（数字键）：
     --num_episodes:     录制 episode 数量（默认 50）
     --episode_time_s:   每 episode 最大时长（默认 300 秒）
     --reset_time_s:     episode 间重置时间（默认 10 秒）
-    --init_mode:        初始控制模式（0/1/2，默认 0）
-    --keep_policy_warm: intervention 期间继续把观测喂给 policy（默认开启）
     --task_description: 任务描述
     --display_data:     启用 rerun 可视化
     --device:           推理设备（默认 auto）
@@ -290,26 +291,6 @@ def main():
         "--display_data", action="store_true", help="启用 rerun 可视化"
     )
 
-    # 介入模式相关
-    parser.add_argument(
-        "--init_mode",
-        type=int,
-        default=0,
-        choices=[0, 1, 2],
-        help="初始控制模式：0=autonomous, 1=intervention, 2=teleop_demo（默认 0）",
-    )
-    parser.add_argument(
-        "--keep_policy_warm",
-        action="store_true",
-        default=True,
-        help="intervention 期间继续把观测喂给 policy 以保持状态（默认开启）",
-    )
-    parser.add_argument(
-        "--no_keep_policy_warm",
-        action="store_true",
-        help="禁用 intervention 期间的 policy 状态保持",
-    )
-
     parser.add_argument("--verbose", action="store_true", help="显示详细日志")
     args = parser.parse_args()
 
@@ -372,7 +353,7 @@ def main():
     kb_listener = EpisodeKeyboardListener()
     kb_listener.start()
 
-    mode_listener = ModeToggleListener(init_mode=args.init_mode)
+    mode_listener = ModeToggleListener()
     mode_listener.start()
 
     events = {
@@ -388,11 +369,9 @@ def main():
     # 处理管线
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
-    keep_policy_warm = args.keep_policy_warm and not args.no_keep_policy_warm
-
     print("\n[INFO] All devices connected. Starting inference + recording loop...")
-    print("  Mode toggle: Space = 切换 autonomous -> intervention -> teleop_demo")
-    print(f"  Initial mode: {mode_listener.control_mode}")
+    print("  Mode toggle: Space = 切到 intervention（单向，本 episode 内不再切回）")
+    print("  每个 episode 从 autonomous 开始")
     print("  Episode controls:")
     print("    1 = 开始/跳过重置")
     print("    2 = 结束当前 episode")
@@ -404,6 +383,10 @@ def main():
     # 6. build_action 回调：核心决策逻辑
     # ------------------------------------------------------------------
     def build_action(obs: dict) -> dict:
+        # autonomous 期间让头部控制器内部目标跟随真实角度，避免切入介入时跳变
+        if mode_listener.control_mode == 0:
+            head_controller.sync_to_observation(obs)
+
         # 处理 episode 控制事件
         kb_ev = kb_listener.consume_events()
         sync_episode_events(kb_ev, events)
@@ -430,17 +413,24 @@ def main():
             teleop_action=teleop_action,
             robot=robot,
             task_description=args.task_description,
-            keep_policy_warm=keep_policy_warm,
         )
 
         return final_action
 
     def episode_start_callback() -> None:
-        """每个 episode 开始前重置策略状态。"""
+        """每个 episode 开始前重置策略状态，并回到 autonomous 模式。"""
         policy.reset()
         preprocessor.reset()
         postprocessor.reset()
-        print("[INFO] 新 episode 开始，已重置 policy / preprocessor / postprocessor")
+        mode_listener.reset()
+        print("[INFO] 新 episode 开始，已重置 policy / preprocessor / postprocessor，模式回到 autonomous")
+
+    # 可选：在 rerun 里实时绘制 control_mode 曲线
+    def post_frame_callback() -> None:
+        if args.display_data:
+            import rerun as rr
+
+            rr.log("control_mode", rr.Scalars(float(mode_listener.control_mode)))
 
     # ------------------------------------------------------------------
     # 7. 启动录制会话
@@ -458,6 +448,7 @@ def main():
             build_action=build_action,
             control_mode_provider=lambda: mode_listener.control_mode,
             episode_start_callback=episode_start_callback,
+            post_frame_callback=post_frame_callback,
         )
     finally:
         print("[INFO] Disconnecting...")

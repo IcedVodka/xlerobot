@@ -347,6 +347,7 @@ def run_recording_session(
     extra_quit_check: Callable | None = None,
     control_mode_provider: Callable[[], int] | None = None,
     episode_start_callback: Callable | None = None,
+    post_frame_callback: Callable | None = None,
 ):
     """跑完整录制会话：episode 循环 + 重置阶段 + 重录/保存逻辑。
 
@@ -357,6 +358,8 @@ def run_recording_session(
             用于在 dataset 中写入 ``control_mode`` 字段。
         episode_start_callback: 可选回调，在每个 episode 的录制阶段开始前调用，
             例如用于重置策略内部状态。
+        post_frame_callback: 可选回调，透传给 ``record_loop``，每帧末尾调用，
+            例如用于 rerun 额外可视化。
     """
     recorded_episodes = 0
 
@@ -390,6 +393,7 @@ def run_recording_session(
                     build_action=build_action,
                     extra_quit_check=extra_quit_check,
                     control_mode_provider=control_mode_provider,
+                    post_frame_callback=post_frame_callback,
                 )
 
                 # ---- 重置阶段（如果还需要继续） ----
@@ -415,6 +419,7 @@ def run_recording_session(
                         build_action=build_action,
                         extra_quit_check=extra_quit_check,
                         control_mode_provider=control_mode_provider,
+                        post_frame_callback=post_frame_callback,
                     )
                     clear_phase_exit_event(events)
 
